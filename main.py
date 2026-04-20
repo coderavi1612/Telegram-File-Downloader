@@ -1,11 +1,16 @@
 import argparse
 import logging
 import os
+import re
+import time
 from mimetypes import guess_extension
 
+from tqdm import tqdm
+import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient, sync
 from telethon.tl.types import MessageMediaPhoto
+from FastTelethonhelper.FastTelethon import download_file
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -14,12 +19,48 @@ API_ID = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 # Initialize the Telegram client with a session name to save the session data
-telegram_client = TelegramClient("session_name", API_ID, API_HASH)
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+telegram_client = TelegramClient("session_name", API_ID, API_HASH, loop=loop)
+
+PROGRESS_STATE = {
+    "status": "idle",
+    "current_file": "",
+    "downloaded_bytes": 0,
+    "total_bytes": 0,
+    "speed": "0 B/s",
+    "logs": [],
+    "errors": []
+}
+
+class WebUILogHandler(logging.Handler):
+    def emit(self, record):
+        msg = self.format(record)
+        PROGRESS_STATE["logs"].append(msg)
+        if record.levelno >= logging.ERROR:
+            PROGRESS_STATE["errors"].append(msg)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Clear existing handlers
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+web_handler = WebUILogHandler()
+web_handler.setFormatter(formatter)
+logger.addHandler(web_handler)
 
 # Supported file categories
 # Note: These are manually curated based on common use cases.
@@ -76,6 +117,30 @@ FILE_CATEGORIES = {
 }
 
 
+def sanitize_filename(text):
+    """Sanitize a string to be safe for use as a filename."""
+    if not text:
+        return ""
+        
+    # Try to extract Index and Title to make cleaner, shorter names
+    index_match = re.search(r'Index\s*[»\->:]*\s*(\d+)', text, re.IGNORECASE)
+    title_match = re.search(r'Title\s*[»\->:]*\s*(.*?)(?=\n|➭|•|Batch|𝐁𝐚𝐭𝐜𝐡|Quality|$)', text, re.IGNORECASE)
+    
+    if index_match and title_match:
+        idx = index_match.group(1).strip()
+        title = title_match.group(1).strip()
+        text = f"{idx} - {title}"
+
+    # Replace newlines and tabs with spaces
+    text = str(text).replace('\n', ' ').replace('\r', '').replace('\t', ' ')
+    # Replace invalid filename characters (Mac/Windows/Linux safe-ish)
+    text = re.sub(r'[<>:"/\\|?*]', '_', text)
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Keep path well under OS limits by slicing at 150 chars
+    return text[:150]
+
+
 def cleanup_incomplete_files(output_dir):
     """Remove any leftover .tmp files from interrupted downloads."""
     for file in os.listdir(output_dir):
@@ -90,6 +155,12 @@ def create_directory_if_needed(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
+def human_readable_size(size, decimal_places=2):
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+        if size < 1024.0 or unit == 'PB':
+            break
+        size /= 1024.0
+    return f"{size:.{decimal_places}f} {unit}"
 
 def check_and_download_file(message, file_path):
     """Downloads the file with a temporary name and renames it after completion."""
@@ -100,10 +171,56 @@ def check_and_download_file(message, file_path):
             return file_path, os.path.getsize(file_path)
 
         temp_file_path = file_path + ".tmp"
+        downloaded_file = False
 
-        # Download the file as a .tmp file first
-        downloaded_file = telegram_client.download_media(message, file=temp_file_path)
+        with tqdm(
+            total=message.file.size if hasattr(message, 'file') and message.file else None,
+            desc=os.path.basename(file_path),
+            unit='B', unit_scale=True, unit_divisor=1024,
+            leave=True
+        ) as pbar:
+            start_time = time.time()
+            last_time = start_time
+            last_bytes = 0
 
+            PROGRESS_STATE["status"] = "downloading"
+            PROGRESS_STATE["current_file"] = os.path.basename(file_path)
+            PROGRESS_STATE["downloaded_bytes"] = 0
+            PROGRESS_STATE["total_bytes"] = pbar.total or 0
+
+            def progress_callback(current, total):
+                nonlocal last_time, last_bytes
+                
+                if pbar.total is None and total:
+                    pbar.total = total
+                    PROGRESS_STATE["total_bytes"] = total
+                    
+                pbar.update(current - pbar.n)
+                
+                # Update progress state for UI
+                PROGRESS_STATE["downloaded_bytes"] = current
+                
+                current_time = time.time()
+                time_diff = current_time - last_time
+                if time_diff >= 0.5:  # Update speed roughly twice a second
+                    speed_bps = (current - last_bytes) / time_diff
+                    PROGRESS_STATE["speed"] = f"{human_readable_size(speed_bps)}/s"
+                    last_time = current_time
+                    last_bytes = current
+
+            # Use FastTelethonhelper parallel downloader for massive speedup
+            with open(temp_file_path, "wb") as f:
+                telegram_client.loop.run_until_complete(
+                    download_file(
+                        client=telegram_client,
+                        location=message.document if message.document else message.photo,
+                        out=f,
+                        progress_callback=progress_callback
+                    )
+                )
+            downloaded_file = True
+
+        PROGRESS_STATE["status"] = "idle"
         # Validate file size before renaming to ensure download was successful
         if (
             downloaded_file
@@ -167,27 +284,32 @@ def resolve_entity(entity_identifier):
 
 
 def download_files_from_entity(
-    entity_identifier, file_type=None, save_directory=".", message_limit=100
+    entity_identifier, file_type=None, save_directory=".", message_limit=0, topic_id=None
 ):
     create_directory_if_needed(save_directory)
     cleanup_incomplete_files(save_directory)
 
     total_file_size = 0
     total_files_downloaded = 0
+    # message_limit of 0 now properly becomes None, meaning "get all messages"
     message_limit = None if message_limit == 0 else message_limit
 
     # Resolve the entity (convert to int if numeric, keep as string otherwise)
     entity = resolve_entity(entity_identifier)
 
     with telegram_client:
-        logging.info(f"Fetching messages from: {entity_identifier}")
-        messages = telegram_client.iter_messages(entity, limit=message_limit)
+        logging.info(f"Fetching messages from: {entity_identifier}{f' (Topic ID: {topic_id})' if topic_id else ''}")
+        # Fetching messages (filtered by topic if provided)
+        messages = telegram_client.iter_messages(entity, limit=message_limit, reply_to=topic_id)
 
         for message in messages:
             if message.media:
                 if isinstance(message.media, MessageMediaPhoto):
                     if not file_type or file_type.lower() == "images":
-                        file_name = f"{message.id}.jpg"
+                        base_name = sanitize_filename(message.message) if message.message else str(message.id)
+                        if not base_name:
+                            base_name = str(message.id)
+                        file_name = f"{base_name}.jpg"
                         file_path = os.path.join(save_directory, file_name)
                         downloaded_file, file_size = check_and_download_file(
                             message, file_path
@@ -202,9 +324,14 @@ def download_files_from_entity(
                     if file_extension is None:
                         file_extension = ""
 
-                    file_name = message.file.name or str(message.id)
-                    if file_extension and not file_name.endswith(file_extension):
-                        file_name += file_extension
+                    base_name = sanitize_filename(message.message) if message.message else ""
+                    if not base_name:
+                        base_name = message.file.name or str(message.id)
+                        # Remove existing extension from base_name if it has one and we are going to append it
+                        if file_extension and base_name.endswith(file_extension):
+                            base_name = base_name[:-len(file_extension)]
+                    
+                    file_name = f"{base_name}{file_extension}"
 
                     file_path = os.path.join(save_directory, file_name)
 
@@ -259,8 +386,14 @@ if __name__ == "__main__":
         "-l",
         "--limit",
         type=int,
-        default=100,
-        help="Maximum number of messages to check (not files to download). Use 0 for no limit. Defaults to 100.",
+        default=0,
+        help="Maximum number of messages to check (not files to download). Use 0 for no limit. Defaults to 0 (all messages).",
+    )
+    parser.add_argument(
+        "-t",
+        "--topic",
+        type=int,
+        help="The topic (thread) ID to download from. Useful for downloading from a specific topic in a supergroup.",
     )
     parser.add_argument(
         "--list",
@@ -275,7 +408,7 @@ if __name__ == "__main__":
             list_dialogs()
         elif args.entity:
             download_files_from_entity(
-                args.entity, args.format, args.output, args.limit
+                args.entity, args.format, args.output, args.limit, args.topic
             )
         else:
             parser.error(
