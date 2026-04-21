@@ -16,7 +16,7 @@ app = FastAPI()
 class DownloadRequest(BaseModel):
     entity: str
     topic_id: Optional[int] = None
-    output_dir: str = "~/Downloads/TelegramDownload/DiscreteMathematics"
+    output_dir: str = ""
     limit: int = 0  # 0 means download all files
 
 def run_download_task(request_data: DownloadRequest):
@@ -116,7 +116,7 @@ def index_page():
             <input type="number" id="topic" placeholder="Topic ID (optional)" value="1931">
             
             <label for="output" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Output Directory (where to save downloaded files):</label>
-            <input type="text" id="output" placeholder="Output Directory" value="~/Downloads/TelegramDownload/DiscreteMathematics">
+            <input type="text" id="output" placeholder="Output Directory" value="~/mnt/usb/GATE/DiscreteMathematics">
             
             <label for="limit" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Message Limit (number of messages to fetch, 0 = ALL):</label>
             <input type="number" id="limit" placeholder="Message Limit (0 = ALL)" value="0">
