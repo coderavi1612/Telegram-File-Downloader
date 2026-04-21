@@ -44,6 +44,11 @@ def run_download_task(request_data: DownloadRequest):
             
             API_ID = os.getenv("TELEGRAM_API_ID")
             API_HASH = os.getenv("TELEGRAM_API_HASH")
+            
+            # Disconnect the old client to release the SQLite lock
+            if main.telegram_client:
+                main.telegram_client.disconnect()
+            
             main.telegram_client = TelegramClient("session_name", API_ID, API_HASH, loop=loop)
             
             main.download_files_from_entity(
@@ -103,10 +108,19 @@ def index_page():
         
         <div class="card">
             <h3>Start Download</h3>
+            
+            <label for="entity" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Entity ID or Username (e.g., -1001234567891 or @channelname):</label>
             <input type="text" id="entity" placeholder="Channel / Group ID (e.g. -1003468527316)" value="-1003468527316">
+            
+            <label for="topic" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Topic ID (optional, for forum groups):</label>
             <input type="number" id="topic" placeholder="Topic ID (optional)" value="1931">
+            
+            <label for="output" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Output Directory (where to save downloaded files):</label>
             <input type="text" id="output" placeholder="Output Directory" value="~/Downloads/TelegramDownload/DiscreteMathematics">
+            
+            <label for="limit" style="display: block; font-size: 14px; margin-bottom: 5px; color: #cbd5e1;">Message Limit (number of messages to fetch, 0 = ALL):</label>
             <input type="number" id="limit" placeholder="Message Limit (0 = ALL)" value="0">
+            
             <button onclick="startDownload()">Start Web Download ⬇️</button>
             <p id="startMsg" style="font-size: 14px; color: yellow;"></p>
         </div>
