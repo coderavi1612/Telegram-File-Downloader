@@ -61,10 +61,30 @@ def run_download_task(request_data: DownloadRequest):
             API_HASH = os.getenv("TELEGRAM_API_HASH")
             
             # Disconnect the old client to release the SQLite lock
-            if main.telegram_client:
-                main.telegram_client.disconnect()
+            if hasattr(main, "telegram_client") and main.telegram_client:
+                # Need to use loop.run_until_complete for async disconnect
+                try:
+                    loop.run_until_complete(main.telegram_client.disconnect())
+                except:
+                    pass
+                if hasattr(main.telegram_client.session, 'close'):
+                    main.telegram_client.session.close()
             
             main.telegram_client = TelegramClient("session_name", API_ID, API_HASH, loop=loop)
+            
+            PROGRESS_STATE["logs"].append("Connecting client...")
+            
+            # Start client but DO NOT prompt for inputs (prevents infinite hanging)
+            try:
+                loop.run_until_complete(main.telegram_client.connect())
+                is_auth = loop.run_until_complete(main.telegram_client.is_user_authorized())
+                if not is_auth:
+                    raise Exception("Not authenticated! Please stop the Web UI, run `python main.py` via SSH/Terminal first to log in, then restart the Web UI.")
+            except Exception as e:
+                PROGRESS_STATE["logs"].append(f"Connection error: {e}")
+                raise e
+            
+            PROGRESS_STATE["logs"].append("Client started successfully!")
             
             main.download_files_from_entity(
                 entity_identifier=request_data.entity,
