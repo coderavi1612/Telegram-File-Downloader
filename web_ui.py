@@ -19,6 +19,21 @@ class DownloadRequest(BaseModel):
     output_dir: str = ""
     limit: int = 0  # 0 means download all files
 
+class TestDirRequest(BaseModel):
+    output_dir: str
+
+@app.post("/test-dir")
+def test_directory(req: TestDirRequest):
+    try:
+        expanded_output = req.output_dir.replace("~", os.path.expanduser("~"))
+        os.makedirs(expanded_output, exist_ok=True)
+        test_file = os.path.join(expanded_output, "test_access.txt")
+        with open(test_file, "w") as f:
+            f.write("This is a test file to verify the Telegram Downloader UI can write here.")
+        return {"success": True, "message": f"Successfully created test file at:\n{test_file}"}
+    except Exception as e:
+        return {"success": False, "message": f"Error: {e}"}
+
 def run_download_task(request_data: DownloadRequest):
     global PROGRESS_STATE
     PROGRESS_STATE["logs"].clear()
@@ -122,7 +137,9 @@ def index_page():
             <input type="number" id="limit" placeholder="Message Limit (0 = ALL)" value="0">
             
             <button onclick="startDownload()">Start Web Download ⬇️</button>
+            <button onclick="testDirectory()" style="background: #475569; margin-top: 5px;">Test Output Directory 📁 (Creates test file)</button>
             <p id="startMsg" style="font-size: 14px; color: yellow;"></p>
+            <p id="testMsg" style="font-size: 14px; word-break: break-all;"></p>
         </div>
 
         <div class="card">
@@ -166,12 +183,32 @@ def index_page():
                 setTimeout(() => document.getElementById('startMsg').innerText = "", 3000);
             }
 
+            async function testDirectory() {
+                const req = { output_dir: document.getElementById('output').value };
+                const res = await fetch('/test-dir', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(req)
+                });
+                const data = await res.json();
+                const msgBox = document.getElementById('testMsg');
+                msgBox.innerText = data.message;
+                msgBox.style.color = data.success ? '#4ade80' : '#f87171'; // Green for success, Red for fail
+            }
+
             async function pollStatus() {
                 try {
                     const res = await fetch('/status');
                     const state = await res.json();
                     
-                    document.getElementById('statusBadge').innerText = state.status;
+                    const badge = document.getElementById('statusBadge');
+                    badge.innerText = state.status;
+                    
+                    if (state.status === "error") badge.style.color = "#f87171"; // Red
+                    else if (state.status === "downloading" || state.status === "starting") badge.style.color = "#facc15"; // Yellow
+                    else if (state.status === "finished") badge.style.color = "#4ade80"; // Green
+                    else badge.style.color = "#60a5fa"; // Blue
+
                     document.getElementById('currentFile').innerText = state.current_file || "None";
                     document.getElementById('speed').innerText = state.speed;
 
